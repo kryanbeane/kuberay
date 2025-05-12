@@ -14,19 +14,24 @@ import (
 
 	"github.com/onsi/gomega"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/api/meta"
 
+	api "github.com/ray-project/kuberay/proto/go_client"
 	rayv1api "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 )
 
 //go:embed resources/*.py
 var files embed.FS
 
+// Refer to https://github.com/ray-project/kuberay/pull/3455 for more info how we observe the right amount resource for e2e test
 var (
-	TestTimeoutShort    = 1 * time.Minute
-	TestTimeoutMedium   = 3 * time.Minute
-	TestTimeoutLong     = 5 * time.Minute
-	TestPollingInterval = 500 * time.Millisecond
+	TestTimeoutShort         = 1 * time.Minute
+	TestTimeoutMedium        = 3 * time.Minute
+	TestTimeoutLong          = 5 * time.Minute
+	TestPollingInterval      = 500 * time.Millisecond
+	ComputeTemplateCPUForE2E = uint32(1) // CPU core
+	CompTemplateMemGiBForE2E = uint32(1)
 )
 
 // CreateHttpRequest instantiates a http request for the specified endpoint and host
@@ -160,4 +165,18 @@ func waitForServiceToDisappear(t *testing.T, tCtx *End2EndTestingContext, servic
 	}, TestTimeoutMedium, TestPollingInterval).Should(gomega.MatchError("rayservices.ray.io \"" + serviceName + "\" not found"))
 
 	t.Logf("Service %s successfully deleted", serviceName)
+}
+
+func clusterSpecEqual(expected, actual *api.ClusterSpec) bool {
+	// Since default environment variables are added in buildRayClusterSpec but omitted during CRD-to-API conversion,
+	// an empty variable may appear in the spec even if the user didn't set it.
+	if expected.HeadGroupSpec.Environment == nil {
+		expected.HeadGroupSpec.Environment = &api.EnvironmentVariables{}
+	}
+	for _, wg := range expected.WorkerGroupSpec {
+		if wg.Environment == nil {
+			wg.Environment = &api.EnvironmentVariables{}
+		}
+	}
+	return proto.Equal(expected, actual)
 }

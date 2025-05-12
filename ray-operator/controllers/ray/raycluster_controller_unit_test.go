@@ -18,6 +18,7 @@ package ray
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -26,7 +27,9 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -51,6 +54,7 @@ import (
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/common"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/expectations"
+	"github.com/ray-project/kuberay/ray-operator/controllers/ray/metrics/mocks"
 	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils"
 	"github.com/ray-project/kuberay/ray-operator/pkg/client/clientset/versioned/scheme"
 	"github.com/ray-project/kuberay/ray-operator/pkg/features"
@@ -3565,6 +3569,106 @@ func Test_ReconcileManagedBy(t *testing.T) {
 				// skip reconciliation
 				assert.InDelta(t, result.RequeueAfter.Seconds(), time.Duration(0).Seconds(), 1e-6)
 			}
+		})
+	}
+}
+
+func TestEmitRayClusterProvisionedDuration(t *testing.T) {
+	clusterName := "test-ray-cluster"
+	clusterNamespace := "default"
+
+	// Creation time 5 minutes ago to simulate cluster runtime
+	creationTime := time.Now().Add(-5 * time.Minute)
+
+	testCases := []struct {
+		name             string
+		oldStatus        rayv1.RayClusterStatus
+		newStatus        rayv1.RayClusterStatus
+		expectMetric     bool
+		expectedDuration float64
+	}{
+		{
+			name: "transition from unprovisioned to provisioned (should emit metrics)",
+			oldStatus: rayv1.RayClusterStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(rayv1.RayClusterProvisioned),
+						Status: metav1.ConditionFalse,
+					},
+				},
+			},
+			newStatus: rayv1.RayClusterStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(rayv1.RayClusterProvisioned),
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+			expectMetric:     true,
+			expectedDuration: time.Since(creationTime).Seconds(),
+		},
+		{
+			name: "already provisioned (should not emit metrics)",
+			oldStatus: rayv1.RayClusterStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(rayv1.RayClusterProvisioned),
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+			newStatus: rayv1.RayClusterStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(rayv1.RayClusterProvisioned),
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+			expectMetric:     false,
+			expectedDuration: time.Since(creationTime).Seconds(),
+		},
+		{
+			name:      "transition from unset to provisioned (should emit metrics)",
+			oldStatus: rayv1.RayClusterStatus{},
+			newStatus: rayv1.RayClusterStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(rayv1.RayClusterProvisioned),
+						Status: metav1.ConditionTrue,
+					},
+				},
+			},
+			expectMetric:     true,
+			expectedDuration: time.Since(creationTime).Seconds(),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockCollector := mocks.NewMockRayClusterMetricsObserver(ctrl)
+			if tc.expectMetric {
+				mockCollector.EXPECT().
+					ObserveRayClusterProvisionedDuration(
+						clusterName,
+						clusterNamespace,
+						mock.MatchedBy(func(d float64) bool {
+							// Allow some wiggle room in timing
+							return math.Abs(d-tc.expectedDuration) < 1.0
+						}),
+					).Times(1)
+			}
+
+			emitRayClusterProvisionedDuration(
+				mockCollector,
+				clusterName,
+				clusterNamespace,
+				tc.oldStatus,
+				tc.newStatus,
+				creationTime,
+			)
 		})
 	}
 }
