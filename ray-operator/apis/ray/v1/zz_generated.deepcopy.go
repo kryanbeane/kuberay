@@ -302,6 +302,11 @@ func (in *RayClusterSpec) DeepCopyInto(out *RayClusterSpec) {
 		*out = new(bool)
 		**out = **in
 	}
+	if in.EnableMTLS != nil {
+		in, out := &in.EnableMTLS, &out.EnableMTLS
+		*out = new(bool)
+		**out = **in
+	}
 	if in.GcsFaultToleranceOptions != nil {
 		in, out := &in.GcsFaultToleranceOptions, &out.GcsFaultToleranceOptions
 		*out = new(GcsFaultToleranceOptions)

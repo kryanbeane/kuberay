@@ -10,6 +10,7 @@ type RayClusterSpecApplyConfiguration struct {
 	AutoscalerOptions        *AutoscalerOptionsApplyConfiguration        `json:"autoscalerOptions,omitempty"`
 	HeadServiceAnnotations   map[string]string                           `json:"headServiceAnnotations,omitempty"`
 	EnableInTreeAutoscaling  *bool                                       `json:"enableInTreeAutoscaling,omitempty"`
+	EnableMTLS               *bool                                       `json:"enableMTLS,omitempty"`
 	GcsFaultToleranceOptions *GcsFaultToleranceOptionsApplyConfiguration `json:"gcsFaultToleranceOptions,omitempty"`
 	HeadGroupSpec            *HeadGroupSpecApplyConfiguration            `json:"headGroupSpec,omitempty"`
 	RayVersion               *string                                     `json:"rayVersion,omitempty"`
@@ -65,6 +66,14 @@ func (b *RayClusterSpecApplyConfiguration) WithHeadServiceAnnotations(entries ma
 // If called multiple times, the EnableInTreeAutoscaling field is set to the value of the last call.
 func (b *RayClusterSpecApplyConfiguration) WithEnableInTreeAutoscaling(value bool) *RayClusterSpecApplyConfiguration {
 	b.EnableInTreeAutoscaling = &value
+	return b
+}
+
+// WithEnableMTLS sets the EnableMTLS field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the EnableMTLS field is set to the value of the last call.
+func (b *RayClusterSpecApplyConfiguration) WithEnableMTLS(value bool) *RayClusterSpecApplyConfiguration {
+	b.EnableMTLS = &value
 	return b
 }
 

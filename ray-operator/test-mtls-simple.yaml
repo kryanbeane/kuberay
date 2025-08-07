@@ -1,0 +1,60 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: mtls-test-simple
+  namespace: default
+spec:
+  rayVersion: '2.9.0'
+  enableMTLS: true
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      port: '6379'
+      num-cpus: '1'
+      memory: '2147483648'
+    template:
+      spec:
+        containers:
+        - name: ray-head
+          image: rayproject/ray:2.9.0
+          ports:
+          - containerPort: 6379
+          - containerPort: 8265
+          - containerPort: 10001
+          resources:
+            limits:
+              cpu: '1'
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          command:
+          - /bin/bash
+          - -c
+          - |
+            ulimit -n 65536
+            ray start --head --port=6379 --dashboard-host=0.0.0.0 --dashboard-port=8265 --num-cpus=1 --memory=2147483648 --block
+  workerGroupSpecs:
+  - groupName: small-group
+    replicas: 1
+    rayStartParams:
+      num-cpus: '1'
+      memory: '2147483648'
+    template:
+      spec:
+        containers:
+        - name: ray-worker
+          image: rayproject/ray:2.9.0
+          resources:
+            limits:
+              cpu: '1'
+              memory: 2Gi
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          command:
+          - /bin/bash
+          - -c
+          - |
+            ulimit -n 65536
+            ray start --address=mtls-test-simple-head-svc:6379 --num-cpus=1 --memory=2147483648 --block
