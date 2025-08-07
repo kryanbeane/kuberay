@@ -303,6 +303,8 @@ spec:
                 type: object
               enableInTreeAutoscaling:
                 type: boolean
+              enableMTLS:
+                type: boolean
               gcsFaultToleranceOptions:
                 properties:
                   externalStorageNamespace:

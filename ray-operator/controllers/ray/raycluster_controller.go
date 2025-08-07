@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	// cert-manager imports
+	certmanagerv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
 	"github.com/go-logr/logr"
 	routev1 "github.com/openshift/api/route/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -305,6 +308,7 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 		r.reconcileAutoscalerServiceAccount,
 		r.reconcileAutoscalerRole,
 		r.reconcileAutoscalerRoleBinding,
+		r.reconcileMTLS,
 		r.reconcileIngress,
 		r.reconcileHeadService,
 		r.reconcileHeadlessService,
@@ -1595,4 +1599,206 @@ func setDefaults(instance *rayv1.RayCluster) {
 			instance.Spec.WorkerGroupSpecs[i].RayStartParams = map[string]string{}
 		}
 	}
+}
+
+// reconcileMTLS handles mutual TLS configuration for Ray clusters
+func (r *RayClusterReconciler) reconcileMTLS(ctx context.Context, instance *rayv1.RayCluster) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Only proceed if mTLS is enabled
+	if instance.Spec.EnableMTLS == nil || !*instance.Spec.EnableMTLS {
+		return nil
+	}
+
+	logger.Info("Reconciling mTLS for RayCluster", "name", instance.Name, "namespace", instance.Namespace)
+
+	// Ensure cert-manager ClusterIssuer exists (create if not)
+	if err := r.ensureClusterIssuer(ctx); err != nil {
+		logger.Error(err, "Failed to ensure ClusterIssuer")
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "MTLSConfigurationFailed",
+			"Failed to configure mTLS for RayCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+		return err
+	}
+
+	// Create RayCluster-specific certificate
+	if err := r.createRayClusterCertificate(ctx, instance); err != nil {
+		logger.Error(err, "Failed to create RayCluster certificate")
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "MTLSConfigurationFailed",
+			"Failed to configure mTLS for RayCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+		return err
+	}
+
+	// Inject mTLS configuration into the RayCluster spec
+	if err := r.injectMTLSConfig(ctx, instance); err != nil {
+		logger.Error(err, "Failed to inject mTLS configuration")
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "MTLSConfigurationFailed",
+			"Failed to configure mTLS for RayCluster %s/%s: %v", instance.Namespace, instance.Name, err)
+		return err
+	}
+
+	logger.Info("Successfully reconciled mTLS for RayCluster", "name", instance.Name)
+	r.Recorder.Eventf(instance, corev1.EventTypeNormal, "MTLSConfigurationSucceeded",
+		"Successfully configured mTLS for RayCluster %s/%s", instance.Namespace, instance.Name)
+	return nil
+}
+
+// ensureClusterIssuer ensures a cert-manager ClusterIssuer exists for mTLS
+func (r *RayClusterReconciler) ensureClusterIssuer(ctx context.Context) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	clusterIssuer := &certmanagerv1.ClusterIssuer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "ray-selfsigned-issuer",
+		},
+		Spec: certmanagerv1.IssuerSpec{
+			IssuerConfig: certmanagerv1.IssuerConfig{
+				SelfSigned: &certmanagerv1.SelfSignedIssuer{},
+			},
+		},
+	}
+
+	if err := r.Create(ctx, clusterIssuer); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create ClusterIssuer: %w", err)
+	}
+
+	logger.Info("Ensured ClusterIssuer exists", "name", clusterIssuer.Name)
+	return nil
+}
+
+// createRayClusterCertificate creates a cert-manager Certificate for the RayCluster
+func (r *RayClusterReconciler) createRayClusterCertificate(ctx context.Context, instance *rayv1.RayCluster) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	certificateName := fmt.Sprintf("%s-certificate", instance.Name)
+	certificate := &certmanagerv1.Certificate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      certificateName,
+			Namespace: instance.Namespace,
+		},
+		Spec: certmanagerv1.CertificateSpec{
+			SecretName:  fmt.Sprintf("%s-tls", instance.Name),
+			Duration:    &metav1.Duration{Duration: 24 * time.Hour},
+			RenewBefore: &metav1.Duration{Duration: 2 * time.Hour},
+			DNSNames: []string{
+				fmt.Sprintf("%s-head-svc", instance.Name),
+				fmt.Sprintf("%s-head-svc.%s", instance.Name, instance.Namespace),
+				fmt.Sprintf("%s-head-svc.%s.svc", instance.Name, instance.Namespace),
+			},
+			IssuerRef: cmmeta.ObjectReference{
+				Name:  "ray-selfsigned-issuer",
+				Kind:  "ClusterIssuer",
+				Group: "cert-manager.io",
+			},
+		},
+	}
+
+	// Set controller reference
+	if err := controllerutil.SetControllerReference(instance, certificate, r.Scheme); err != nil {
+		return fmt.Errorf("failed to set controller reference: %w", err)
+	}
+
+	if err := r.Create(ctx, certificate); err != nil && !errors.IsAlreadyExists(err) {
+		return fmt.Errorf("failed to create certificate: %w", err)
+	}
+
+	logger.Info("Created RayCluster certificate", "name", certificateName)
+	return nil
+}
+
+// injectMTLSConfig injects mTLS environment variables and volume mounts into the RayCluster
+func (r *RayClusterReconciler) injectMTLSConfig(ctx context.Context, instance *rayv1.RayCluster) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Validate head group spec exists and has containers
+	if instance.Spec.HeadGroupSpec.Template.Spec.Containers == nil {
+		return fmt.Errorf("head group spec must have at least one container")
+	}
+
+	// Add mTLS environment variables to head group
+	r.addMTLSEnvToContainer(&instance.Spec.HeadGroupSpec.Template.Spec.Containers[0])
+	r.addMTLSVolumesToPod(&instance.Spec.HeadGroupSpec.Template.Spec, instance)
+
+	// Add mTLS environment variables to all worker groups
+	for i := range instance.Spec.WorkerGroupSpecs {
+		// Validate worker group spec has containers
+		if instance.Spec.WorkerGroupSpecs[i].Template.Spec.Containers == nil {
+			return fmt.Errorf("worker group spec at index %d must have at least one container", i)
+		}
+
+		r.addMTLSEnvToContainer(&instance.Spec.WorkerGroupSpecs[i].Template.Spec.Containers[0])
+		r.addMTLSVolumesToPod(&instance.Spec.WorkerGroupSpecs[i].Template.Spec, instance)
+	}
+
+	logger.Info("Injected mTLS configuration into RayCluster", "name", instance.Name)
+	return nil
+}
+
+// addMTLSEnvToContainer adds mTLS environment variables to a container
+func (r *RayClusterReconciler) addMTLSEnvToContainer(container *corev1.Container) {
+	// Check if TLS is already configured
+	for _, env := range container.Env {
+		if env.Name == "RAY_USE_TLS" {
+			return // TLS already configured
+		}
+	}
+
+	// Add mTLS environment variables
+	tlsEnvs := []corev1.EnvVar{
+		{Name: "RAY_USE_TLS", Value: "1"},
+		{Name: "RAY_TLS_SERVER_CERT", Value: "/etc/ray/tls/tls.crt"},
+		{Name: "RAY_TLS_SERVER_KEY", Value: "/etc/ray/tls/tls.key"},
+		{Name: "RAY_TLS_CA_CERT", Value: "/etc/ray/tls/ca.crt"},
+	}
+
+	container.Env = append(container.Env, tlsEnvs...)
+}
+
+// addMTLSVolumesToPod adds mTLS volumes to a pod spec
+func (r *RayClusterReconciler) addMTLSVolumesToPod(podSpec *corev1.PodSpec, instance *rayv1.RayCluster) {
+	// Check if TLS volumes already exist
+	for _, volume := range podSpec.Volumes {
+		if volume.Name == "ray-tls" {
+			return // TLS volumes already configured
+		}
+	}
+
+	// Add TLS volumes
+	tlsVolumes := []corev1.Volume{
+		{
+			Name: "ray-tls",
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: fmt.Sprintf("%s-tls", instance.Name),
+				},
+			},
+		},
+	}
+
+	podSpec.Volumes = append(podSpec.Volumes, tlsVolumes...)
+
+	// Add volume mounts to all containers
+	for i := range podSpec.Containers {
+		r.addMTLSVolumeMountsToContainer(&podSpec.Containers[i])
+	}
+}
+
+// addMTLSVolumeMountsToContainer adds mTLS volume mounts to a container
+func (r *RayClusterReconciler) addMTLSVolumeMountsToContainer(container *corev1.Container) {
+	// Check if TLS volume mounts already exist
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == "ray-tls" {
+			return // TLS volume mounts already configured
+		}
+	}
+
+	// Add TLS volume mounts
+	tlsMounts := []corev1.VolumeMount{
+		{
+			Name:      "ray-tls",
+			MountPath: "/etc/ray/tls",
+			ReadOnly:  true,
+		},
+	}
+
+	container.VolumeMounts = append(container.VolumeMounts, tlsMounts...)
 }

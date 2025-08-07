@@ -33,6 +33,11 @@ type RayClusterSpec struct {
 	// EnableInTreeAutoscaling indicates whether operator should create in tree autoscaling configs
 	// +optional
 	EnableInTreeAutoscaling *bool `json:"enableInTreeAutoscaling,omitempty"`
+	// EnableMTLS enables mutual TLS authentication for the Ray cluster.
+	// When enabled, KubeRay will automatically create certificates and configure mTLS for all Ray nodes.
+	// TODO: Move to namespace-scoped CA management for production
+	// +optional
+	EnableMTLS *bool `json:"enableMTLS,omitempty"`
 	// GcsFaultToleranceOptions for enabling GCS FT
 	// +optional
 	GcsFaultToleranceOptions *GcsFaultToleranceOptions `json:"gcsFaultToleranceOptions,omitempty"`
