@@ -30,8 +30,8 @@ func (d *RayClusterDefaulter) Default(_ context.Context, obj runtime.Object) err
 	}
 
 	// Add NetworkPolicy annotation if not explicitly set
-	if _, exists := rayCluster.Annotations[utils.EnableNetworkPolicyAnnotationKey]; !exists {
-		rayCluster.Annotations[utils.EnableNetworkPolicyAnnotationKey] = "true"
+	if _, exists := rayCluster.Annotations[utils.EnableSecureTrustedNetworkAnnotationKey]; !exists {
+		rayCluster.Annotations[utils.EnableSecureTrustedNetworkAnnotationKey] = "true"
 		rayclusterlog.Info("auto-enabling secure trusted network", "name", rayCluster.Name, "namespace", rayCluster.Namespace)
 	}
 
