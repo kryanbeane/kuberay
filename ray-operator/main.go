@@ -266,7 +266,9 @@ func main() {
 
 	if os.Getenv("ENABLE_WEBHOOKS") == "true" {
 		exitOnError(webhooks.SetupRayClusterWebhookWithManager(mgr),
-			"unable to create webhook", "webhook", "RayCluster")
+			"unable to create webhook", "webhook", "RayCluster-Validator")
+		exitOnError(webhooks.SetupRayClusterDefaulterWithManager(mgr),
+			"unable to create webhook", "webhook", "RayCluster-Defaulter")
 	}
 	// +kubebuilder:scaffold:builder
 
