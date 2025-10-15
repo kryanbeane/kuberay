@@ -133,6 +133,9 @@ var _ = Describe("RayCluster validating webhook", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      "invalid.name",
+					Annotations: map[string]string{
+						"odh.ray.io/secure-trusted-network": "false", // Disable mutation for this test
+					},
 				},
 				Spec: rayv1.RayClusterSpec{
 					HeadGroupSpec: rayv1.HeadGroupSpec{
@@ -167,6 +170,9 @@ var _ = Describe("RayCluster validating webhook", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name,
 					Namespace: namespace,
+					Annotations: map[string]string{
+						"odh.ray.io/secure-trusted-network": "false", // Disable mutation for this test
+					},
 				},
 				Spec: rayv1.RayClusterSpec{
 					HeadGroupSpec: rayv1.HeadGroupSpec{
