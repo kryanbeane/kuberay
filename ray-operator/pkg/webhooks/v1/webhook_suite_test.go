@@ -98,7 +98,7 @@ var _ = BeforeSuite(func() {
 	err = SetupRayClusterDefaulterWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = SetupRayClusterWebhookWithManager(mgr)
+	err = SetupRayClusterValidatorWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
 	//+kubebuilder:scaffold:webhook
