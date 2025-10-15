@@ -133,15 +133,18 @@ var _ = Describe("RayCluster validating webhook", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      "invalid.name",
-					Annotations: map[string]string{
-						"odh.ray.io/secure-trusted-network": "false", // Disable mutation for this test
-					},
 				},
 				Spec: rayv1.RayClusterSpec{
 					HeadGroupSpec: rayv1.HeadGroupSpec{
+						RayStartParams: map[string]string{},
 						Template: corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{},
+								Containers: []corev1.Container{
+									{
+										Name:  "ray-head",
+										Image: "rayproject/ray:latest",
+									},
+								},
 							},
 						},
 					},
@@ -170,32 +173,47 @@ var _ = Describe("RayCluster validating webhook", func() {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      name,
 					Namespace: namespace,
-					Annotations: map[string]string{
-						"odh.ray.io/secure-trusted-network": "false", // Disable mutation for this test
-					},
 				},
 				Spec: rayv1.RayClusterSpec{
 					HeadGroupSpec: rayv1.HeadGroupSpec{
+						RayStartParams: map[string]string{},
 						Template: corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{},
+								Containers: []corev1.Container{
+									{
+										Name:  "ray-head",
+										Image: "rayproject/ray:latest",
+									},
+								},
 							},
 						},
 					},
 					WorkerGroupSpecs: []rayv1.WorkerGroupSpec{
 						{
-							GroupName: "group1",
+							GroupName:      "group1",
+							RayStartParams: map[string]string{},
 							Template: corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{},
+									Containers: []corev1.Container{
+										{
+											Name:  "ray-worker",
+											Image: "rayproject/ray:latest",
+										},
+									},
 								},
 							},
 						},
 						{
-							GroupName: "group1",
+							GroupName:      "group1",
+							RayStartParams: map[string]string{},
 							Template: corev1.PodTemplateSpec{
 								Spec: corev1.PodSpec{
-									Containers: []corev1.Container{},
+									Containers: []corev1.Container{
+										{
+											Name:  "ray-worker",
+											Image: "rayproject/ray:latest",
+										},
+									},
 								},
 							},
 						},
