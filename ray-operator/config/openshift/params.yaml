@@ -3,3 +3,7 @@ varReference:
     kind: SecurityContextConstraints
   - path: spec/template/spec/containers[]/image
     kind: Deployment
+  - path: spec/dnsNames
+    kind: Certificate
+  - path: metadata/annotations/cert-manager.io~1inject-ca-from
+    kind: ValidatingWebhookConfiguration
