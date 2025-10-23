@@ -108,6 +108,7 @@ type RayClusterReconcilerOptions struct {
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=roles,verbs=get;list;watch;create;delete;update
 // +kubebuilder:rbac:groups="rbac.authorization.k8s.io",resources=rolebindings,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 
 // [WARNING]: There MUST be a newline after kubebuilder markers.
 
@@ -152,6 +153,94 @@ func (r *RayClusterReconciler) deleteAllPods(ctx context.Context, filters common
 	return pods, nil
 }
 
+// reconcileJITCheckpointPVC ensures the PVC for JIT checkpoints exists
+func (r *RayClusterReconciler) reconcileJITCheckpointPVC(ctx context.Context, instance *rayv1.RayCluster) error {
+	logger := ctrl.LoggerFrom(ctx)
+
+	if !utils.IsJITCheckpointEnabled(instance.Annotations) {
+		return nil // JIT checkpoint not enabled, skip
+	}
+
+	// Determine PVC name:
+	// - If RayCluster is owned by a RayJob, use RayJob name for PVC name (so PVC persists during suspend/resume)
+	// - Otherwise, use RayCluster name
+	pvcBaseName := instance.Name
+	var rayJobOwner *rayv1.RayJob
+	for _, ownerRef := range instance.OwnerReferences {
+		if ownerRef.Kind == "RayJob" {
+			// RayCluster is owned by RayJob - use RayJob name for PVC
+			rayJob := &rayv1.RayJob{}
+			if err := r.Get(ctx, client.ObjectKey{Name: ownerRef.Name, Namespace: instance.Namespace}, rayJob); err != nil {
+				logger.Info("Failed to get RayJob owner for PVC naming, using RayCluster name", "error", err)
+			} else {
+				pvcBaseName = rayJob.Name
+				rayJobOwner = rayJob
+				logger.Info("Using RayJob name for PVC to enable suspend/resume persistence", "rayJob", rayJob.Name)
+			}
+			break
+		}
+	}
+
+	pvcName := utils.GetJITCheckpointPVCName(pvcBaseName, instance.Annotations)
+
+	// Check if PVC already exists
+	existingPVC := &corev1.PersistentVolumeClaim{}
+	err := r.Get(ctx, client.ObjectKey{Name: pvcName, Namespace: instance.Namespace}, existingPVC)
+
+	if err == nil {
+		// PVC exists, nothing to do
+		logger.Info("JIT checkpoint PVC already exists", "pvcName", pvcName)
+		return nil
+	}
+
+	if !errors.IsNotFound(err) {
+		// Unexpected error
+		return fmt.Errorf("failed to check for existing JIT checkpoint PVC: %w", err)
+	}
+
+	// PVC doesn't exist, create it
+	logger.Info("Creating JIT checkpoint PVC", "pvcName", pvcName)
+
+	pvc, err := common.BuildJITCheckpointPVC(instance)
+	if err != nil {
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "FailedToCreateJITCheckpointPVC",
+			"Failed to build JIT checkpoint PVC: %v", err)
+		return err
+	}
+
+	// Override PVC name if we're using RayJob name
+	pvc.Name = pvcName
+
+	// Set owner reference for PVC:
+	// - If RayCluster is owned by a RayJob, set PVC owner to RayJob (so PVC persists during suspend/resume)
+	// - Otherwise, set PVC owner to RayCluster
+	if rayJobOwner != nil {
+		// Use RayJob as owner so PVC persists across RayCluster deletions (suspend/resume)
+		logger.Info("Setting RayJob as PVC owner for suspend/resume persistence", "rayJob", rayJobOwner.Name)
+		if err := controllerutil.SetControllerReference(rayJobOwner, pvc, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set RayJob owner reference for JIT checkpoint PVC: %w", err)
+		}
+	} else {
+		// Use RayCluster as owner (normal case)
+		if err := controllerutil.SetControllerReference(instance, pvc, r.Scheme); err != nil {
+			return fmt.Errorf("failed to set owner reference for JIT checkpoint PVC: %w", err)
+		}
+	}
+
+	if err := r.Create(ctx, pvc); err != nil {
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "FailedToCreateJITCheckpointPVC",
+			"Failed to create JIT checkpoint PVC %s: %v", pvcName, err)
+		return fmt.Errorf("failed to create JIT checkpoint PVC: %w", err)
+	}
+
+	r.Recorder.Eventf(instance, corev1.EventTypeNormal, "CreatedJITCheckpointPVC",
+		"Successfully created JIT checkpoint PVC %s with size %s",
+		pvcName, utils.GetJITCheckpointPVCSize(instance.Annotations))
+
+	logger.Info("Successfully created JIT checkpoint PVC", "pvcName", pvcName)
+	return nil
+}
+
 func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance *rayv1.RayCluster) (ctrl.Result, error) {
 	var reconcileErr error
 	logger := ctrl.LoggerFrom(ctx)
@@ -186,6 +275,16 @@ func (r *RayClusterReconciler) rayClusterReconcile(ctx context.Context, instance
 
 	// Please do NOT modify `originalRayClusterInstance` in the following code.
 	originalRayClusterInstance := instance.DeepCopy()
+
+	// Reconcile JIT checkpoint PVC if enabled
+	if err := r.reconcileJITCheckpointPVC(ctx, instance); err != nil {
+		logger.Error(err, "Failed to reconcile JIT checkpoint PVC")
+		r.Recorder.Eventf(instance, corev1.EventTypeWarning, "JITCheckpointPVCError",
+			"Failed to reconcile JIT checkpoint PVC: %v", err)
+		// Don't fail the reconciliation, continue with other operations
+		// but requeue to retry PVC creation
+		return ctrl.Result{RequeueAfter: DefaultRequeueDuration}, err
+	}
 
 	// The `enableGCSFTRedisCleanup` is a feature flag introduced in KubeRay v1.0.0. It determines whether
 	// the Redis cleanup job should be activated. Users can disable the feature by setting the environment

@@ -16,9 +16,9 @@ namespace: default
 #- ../prometheus
 
 images:
-- name: kuberay/operator
-  newName: quay.io/kuberay/operator
-  newTag: nightly
+- name: quay.io/kuberay/operator
+  newName: nightly
+  newTag: jit-checkpoint
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

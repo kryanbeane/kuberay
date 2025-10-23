@@ -925,3 +925,51 @@ func GetRayHttpProxyClientFunc(mgr manager.Manager, useKubernetesProxy bool) fun
 func HasSubmitter(rayJobInstance *rayv1.RayJob) bool {
 	return rayJobInstance.Spec.SubmissionMode == rayv1.K8sJobMode || rayJobInstance.Spec.SubmissionMode == rayv1.SidecarMode
 }
+
+// IsJITCheckpointEnabled checks if JIT checkpointing is enabled via annotation
+func IsJITCheckpointEnabled(annotations map[string]string) bool {
+	if v, ok := annotations[RayJITCheckpointEnabledAnnotationKey]; ok {
+		return strings.ToLower(v) == "true"
+	}
+	return false
+}
+
+// GetJITCheckpointKillWait returns the kill_wait duration from annotations or default
+func GetJITCheckpointKillWait(annotations map[string]string) float64 {
+	if v, ok := annotations[RayJITCheckpointKillWaitAnnotationKey]; ok {
+		if killWait, err := strconv.ParseFloat(v, 64); err == nil && killWait > 0 {
+			return killWait
+		}
+	}
+	return DefaultJITCheckpointKillWait
+}
+
+// GetJITCheckpointPVCName returns the PVC name from annotations or generates default
+func GetJITCheckpointPVCName(clusterName string, annotations map[string]string) string {
+	if v, ok := annotations[RayJITCheckpointPVCNameAnnotationKey]; ok && v != "" {
+		return v
+	}
+	return fmt.Sprintf("%s-jit-checkpoints", clusterName)
+}
+
+// GetJITCheckpointPVCSize returns the PVC size from annotations or default
+func GetJITCheckpointPVCSize(annotations map[string]string) string {
+	if v, ok := annotations[RayJITCheckpointPVCSizeAnnotationKey]; ok && v != "" {
+		return v
+	}
+	return DefaultJITCheckpointPVCSize
+}
+
+// GetJITCheckpointStorageClass returns the storage class from annotations
+func GetJITCheckpointStorageClass(annotations map[string]string) *string {
+	if v, ok := annotations[RayJITCheckpointStorageClassAnnotationKey]; ok && v != "" {
+		return &v
+	}
+	return nil // Use cluster default
+}
+
+// CalculateJITCheckpointGracePeriod calculates pod termination grace period
+// Formula: kill_wait + buffer (default 30s) to ensure checkpoint has time to complete
+func CalculateJITCheckpointGracePeriod(killWait float64) int64 {
+	return int64(killWait) + int64(DefaultJITCheckpointGracePeriodBuffer)
+}

@@ -65,6 +65,12 @@ const (
 	// Recovery after timeout:
 	//   The RayService must be deleted and recreated. Updating the spec will NOT retry initialization.
 	RayServiceInitializingTimeoutAnnotation = "ray.io/initializing-timeout"
+	// JIT Checkpoint related annotations
+	RayJITCheckpointEnabledAnnotationKey      = "ray.io/jit-checkpoint-enabled"
+	RayJITCheckpointKillWaitAnnotationKey     = "ray.io/jit-checkpoint-kill-wait"
+	RayJITCheckpointPVCNameAnnotationKey      = "ray.io/jit-checkpoint-pvc-name"
+	RayJITCheckpointPVCSizeAnnotationKey      = "ray.io/jit-checkpoint-pvc-size"
+	RayJITCheckpointStorageClassAnnotationKey = "ray.io/jit-checkpoint-storage-class"
 
 	// RayJob default cluster selector key
 	RayJobClusterSelectorKey = "ray.io/cluster"
@@ -150,6 +156,12 @@ const (
 	RAY_NODE_TYPE_NAME       = "RAY_NODE_TYPE_NAME"
 	RAY_ENABLE_AUTOSCALER_V2 = "RAY_enable_autoscaler_v2"
 
+	// Environment variables for JIT checkpointing
+	RAY_TRAIN_JIT_CHECKPOINT_ENABLED   = "RAY_TRAIN_JIT_CHECKPOINT_ENABLED"
+	RAY_TRAIN_JIT_CHECKPOINT_KILL_WAIT = "RAY_TRAIN_JIT_CHECKPOINT_KILL_WAIT"
+	RAY_TRAIN_CHECKPOINT_STORAGE_PATH  = "RAY_TRAIN_CHECKPOINT_STORAGE_PATH"
+	RAY_TRAIN_AUTO_RESUME              = "RAY_TRAIN_AUTO_RESUME"
+
 	// This KubeRay operator environment variable is used to determine if random Pod
 	// deletion should be enabled. Note that this only takes effect when autoscaling
 	// is enabled for the RayCluster. This is a feature flag for v0.6.0, and will be
@@ -197,6 +209,12 @@ const (
 
 	// Ray core default configurations
 	DefaultWorkerRayGcsReconnectTimeoutS = "600"
+
+	// JIT checkpoint defaults
+	DefaultJITCheckpointKillWait          = 3.0
+	DefaultJITCheckpointPVCSize           = "10Gi"
+	DefaultJITCheckpointMountPath         = "/mnt/ray-checkpoints"
+	DefaultJITCheckpointGracePeriodBuffer = 30 // seconds
 
 	LOCAL_HOST = "127.0.0.1"
 	// Ray FT default readiness probe values

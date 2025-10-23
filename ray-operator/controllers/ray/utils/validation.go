@@ -9,6 +9,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 
@@ -79,6 +80,40 @@ func validateRayGroupLabels(groupName string, rayStartParams, labels map[string]
 	return nil
 }
 
+// validateJITCheckpointAnnotations validates JIT checkpoint configuration
+func validateJITCheckpointAnnotations(annotations map[string]string) error {
+	if !IsJITCheckpointEnabled(annotations) {
+		return nil // Not enabled, skip validation
+	}
+
+	// Validate kill_wait if specified
+	if v, ok := annotations[RayJITCheckpointKillWaitAnnotationKey]; ok {
+		killWait, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("invalid %s annotation: must be a valid float, got %s",
+				RayJITCheckpointKillWaitAnnotationKey, v)
+		}
+		if killWait <= 0 {
+			return fmt.Errorf("invalid %s annotation: must be greater than 0, got %f",
+				RayJITCheckpointKillWaitAnnotationKey, killWait)
+		}
+		if killWait > 60 {
+			return fmt.Errorf("invalid %s annotation: must be <= 60 seconds for safety, got %f",
+				RayJITCheckpointKillWaitAnnotationKey, killWait)
+		}
+	}
+
+	// Validate PVC size if specified
+	if v, ok := annotations[RayJITCheckpointPVCSizeAnnotationKey]; ok {
+		if _, err := resource.ParseQuantity(v); err != nil {
+			return fmt.Errorf("invalid %s annotation: must be a valid Kubernetes quantity, got %s",
+				RayJITCheckpointPVCSizeAnnotationKey, v)
+		}
+	}
+
+	return nil
+}
+
 // Validation for invalid Ray Cluster configurations.
 func ValidateRayClusterSpec(spec *rayv1.RayClusterSpec, annotations map[string]string) error {
 	if len(spec.HeadGroupSpec.Template.Spec.Containers) == 0 {
@@ -143,6 +178,11 @@ func ValidateRayClusterSpec(spec *rayv1.RayClusterSpec, annotations map[string]s
 	if spec.HeadGroupSpec.RayStartParams["redis-username"] != "" || EnvVarExists(REDIS_USERNAME, headContainer.Env) {
 		return fmt.Errorf("cannot set redis username in rayStartParams or environment variables" +
 			" - use GcsFaultToleranceOptions.RedisUsername instead")
+	}
+
+	// Validate JIT checkpoint annotations
+	if err := validateJITCheckpointAnnotations(annotations); err != nil {
+		return err
 	}
 
 	if !features.Enabled(features.RayJobDeletionPolicy) {

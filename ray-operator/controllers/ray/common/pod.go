@@ -158,6 +158,69 @@ func configureGCSFaultTolerance(podTemplate *corev1.PodTemplateSpec, instance ra
 	}
 }
 
+// configureJITCheckpoint configures environment variables and volumes for JIT checkpointing
+func configureJITCheckpoint(podTemplate *corev1.PodTemplateSpec, instance rayv1.RayCluster) {
+	if !utils.IsJITCheckpointEnabled(instance.Annotations) {
+		return
+	}
+
+	container := &podTemplate.Spec.Containers[utils.RayContainerIndex]
+
+	// Log that we're configuring JIT checkpoint
+	// Use a simple approach - add a comment marker for debugging
+
+	// Inject environment variables for JIT checkpoint configuration
+	jitEnvVars := []corev1.EnvVar{
+		{
+			Name:  utils.RAY_TRAIN_JIT_CHECKPOINT_ENABLED,
+			Value: "true",
+		},
+		{
+			Name:  utils.RAY_TRAIN_JIT_CHECKPOINT_KILL_WAIT,
+			Value: fmt.Sprintf("%.1f", utils.GetJITCheckpointKillWait(instance.Annotations)),
+		},
+		{
+			Name:  utils.RAY_TRAIN_CHECKPOINT_STORAGE_PATH,
+			Value: utils.DefaultJITCheckpointMountPath,
+		},
+		{
+			Name:  utils.RAY_TRAIN_AUTO_RESUME,
+			Value: "true", // Enable automatic checkpoint resume
+		},
+	}
+
+	for _, envVar := range jitEnvVars {
+		if !utils.EnvVarExists(envVar.Name, container.Env) {
+			container.Env = append(container.Env, envVar)
+		}
+	}
+
+	// Add volume mount for checkpoint storage
+	volumeMount := GetJITCheckpointVolumeMount(&instance)
+	container.VolumeMounts = append(container.VolumeMounts, volumeMount)
+
+	// Determine PVC base name:
+	// - If RayCluster is owned by a RayJob, use RayJob name (same as PVC creation logic)
+	// - Otherwise, use RayCluster name
+	pvcBaseName := instance.Name
+	for _, ownerRef := range instance.OwnerReferences {
+		if ownerRef.Kind == "RayJob" {
+			pvcBaseName = ownerRef.Name
+			break
+		}
+	}
+
+	// Add volume to pod spec
+	volume := GetJITCheckpointVolume(pvcBaseName, instance.Annotations)
+	podTemplate.Spec.Volumes = append(podTemplate.Spec.Volumes, volume)
+
+	// Set termination grace period
+	gracePeriod := utils.CalculateJITCheckpointGracePeriod(
+		utils.GetJITCheckpointKillWait(instance.Annotations),
+	)
+	podTemplate.Spec.TerminationGracePeriodSeconds = &gracePeriod
+}
+
 // DefaultHeadPodTemplate sets the config values
 func DefaultHeadPodTemplate(ctx context.Context, instance rayv1.RayCluster, headSpec rayv1.HeadGroupSpec, podName string, headPort string) corev1.PodTemplateSpec {
 	// TODO (Dmitri) The argument headPort is essentially unused;
@@ -210,6 +273,9 @@ func DefaultHeadPodTemplate(ctx context.Context, instance rayv1.RayCluster, head
 	}
 
 	configureGCSFaultTolerance(&podTemplate, instance, rayv1.HeadNode)
+
+	// Configure JIT checkpoint storage and environment variables
+	configureJITCheckpoint(&podTemplate, instance)
 
 	// If the metrics port does not exist in the Ray container, add a default one for Prometheus.
 	isMetricsPortExists := utils.FindContainerPort(&podTemplate.Spec.Containers[utils.RayContainerIndex], utils.MetricsPortName, -1) != -1
@@ -339,6 +405,9 @@ func DefaultWorkerPodTemplate(ctx context.Context, instance rayv1.RayCluster, wo
 
 	initTemplateAnnotations(instance, &podTemplate)
 	configureGCSFaultTolerance(&podTemplate, instance, rayv1.WorkerNode)
+
+	// Configure JIT checkpoint storage and environment variables
+	configureJITCheckpoint(&podTemplate, instance)
 
 	// If the metrics port does not exist in the Ray container, add a default one for Prometheus.
 	isMetricsPortExists := utils.FindContainerPort(&podTemplate.Spec.Containers[utils.RayContainerIndex], utils.MetricsPortName, -1) != -1
