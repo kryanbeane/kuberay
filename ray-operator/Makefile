@@ -67,7 +67,6 @@ test: ENVTEST_K8S_VERSION ?= 1.24.2
 test: manifests fmt vet envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $(WHAT) -coverprofile cover.out
 
-# You can use `go test -timeout 30m -v ./test/e2e/rayjob_test.go ./test/e2e/support.go` if you only want to run tests in `rayjob_test.go`.
 test-e2e: WHAT ?= ./test/e2e
 test-e2e: manifests fmt vet ## Run e2e tests.
 	go test -timeout 30m -v $(WHAT)
@@ -76,12 +75,28 @@ test-e2e-autoscaler: WHAT ?= ./test/e2eautoscaler
 test-e2e-autoscaler: manifests fmt vet ## Run e2e autoscaler tests.
 	go test -timeout 30m -v $(WHAT)
 
+test-e2e-rayservice: WHAT ?= ./test/e2erayservice
+test-e2e-rayservice: manifests fmt vet ## Run e2e RayService tests.
+	go test -timeout 30m -v $(WHAT)
+
 test-e2e-upgrade: WHAT ?= ./test/e2eupgrade
-test-e2e-upgrade: manifests fmt vet ## Run e2e tests.
+test-e2e-upgrade: manifests fmt vet ## Run e2e operator upgrade tests.
+	go test -timeout 30m -v $(WHAT)
+
+test-e2e-incremental-upgrade: WHAT ?= ./test/e2eincrementalupgrade
+test-e2e-incremental-upgrade: manifests fmt vet ## Run e2e RayService incremental upgrade tests.
+	go test -timeout 30m -v $(WHAT)
+
+test-e2e-rayjob-submitter: WHAT ?= ./test/e2erayjobsubmitter
+test-e2e-rayjob-submitter: manifests fmt vet ## Run e2e light weight submitter tests.
 	go test -timeout 30m -v $(WHAT)
 
 test-sampleyaml: WHAT ?= ./test/sampleyaml
 test-sampleyaml: manifests fmt vet
+	go test -timeout 30m -v $(WHAT)
+
+test-e2e-rayjob: WHAT ?= ./test/e2erayjob
+test-e2e-rayjob: manifests fmt vet ## Run e2e RayJob tests.
 	go test -timeout 30m -v $(WHAT)
 
 sync: helm api-docs
@@ -103,6 +118,8 @@ build: fmt vet ## Build manager binary.
 # KubeRay sends HTTP requests to the Ray head using ${HEAD_SVC_FQDN}:52365 which is not reachable from outside of a K8s cluster.
 # For detail, see https://docs.ray.io/en/master/cluster/kubernetes/troubleshooting/rayservice-troubleshooting.html#issue-5-fail-to-create-update-serve-applications
 # 	go run ./main.go -enable-leader-election=false
+build-rayjob-submitter:
+	go build -o bin/submitter ./rayjob-submitter/cmd/main.go
 
 docker-image: ## Build image only
 	${ENGINE} build -t ${IMG} .
@@ -112,8 +129,14 @@ docker-build: build docker-image ## Build image with the manager.
 docker-push: ## Push image with the manager.
 	${ENGINE} push ${IMG}
 
-docker-multi-arch-image: # Build and push multi arch image, amd64 and arm64 currently
-	${ENGINE} buildx build --push --platform linux/amd64,linux/arm64/v8 -t ${IMG} .
+docker-multi-arch-build: # Build multi arch image, amd64 and arm64 currently
+	${ENGINE} buildx build --platform linux/amd64,linux/arm64 -t ${IMG} .
+
+docker-multi-arch-push: ## Build and Push multi arch image, amd64 and arm64 currently
+	${ENGINE} buildx build --push --platform linux/amd64,linux/arm64 -t ${IMG} .
+
+docker-image-rayjob-submitter:
+	${ENGINE} build -t ${IMG} --target submitter .
 
 ##@ Deployment
 
@@ -126,6 +149,15 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/default && $(KUSTOMIZE) edit set image kuberay/operator=${IMG}
 	$(KUSTOMIZE) build config/default | kubectl apply --server-side=true -f -
+
+# NOTE FOR CONTRIBUTORS:
+# deploy-with-override is an e2e/CI-only deployment path. It applies a Kustomize overlay that
+# enables test-only feature gates (e.g. RayJobDeletionPolicy) without changing the default
+# behavior of the base Helm chart or the standard 'make deploy'. Add additional test overrides
+# to the overlay (config/overlays/rayjob-deletion-policy) rather than modifying the base.
+deploy-with-override: manifests kustomize ## Deploy controller with test-only feature gate overrides (does NOT affect default chart).
+	cd config/default && $(KUSTOMIZE) edit set image kuberay/operator=${IMG}
+	$(KUSTOMIZE) build config/overlays/test-overrides | kubectl apply --server-side=true -f -
 
 undeploy: ## Undeploy controller from the K8s cluster specified in ~/.kube/config.
 	$(KUSTOMIZE) build config/default | kubectl delete -f -
@@ -163,7 +195,7 @@ controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessar
 KUSTOMIZE = $(LOCALBIN)/kustomize
 $(KUSTOMIZE): $(LOCALBIN)
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
-	test -s $(KUSTOMIZE) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@v5.3.0
+	test -s $(KUSTOMIZE) || GOBIN=$(LOCALBIN) go install sigs.k8s.io/kustomize/kustomize/v5@v5.7.1
 
 ENVTEST = $(LOCALBIN)/setup-envtest
 $(ENVTEST): $(LOCALBIN)

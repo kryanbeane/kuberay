@@ -17,9 +17,11 @@ package ray
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"math"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1604,146 +1606,6 @@ func TestReconcile_UpdateClusterState(t *testing.T) {
 	err = fakeClient.Get(ctx, namespacedName, &cluster)
 	require.NoError(t, err, "Fail to get RayCluster after updating state")
 	assert.Equal(t, cluster.Status.State, state, "Cluster state should be updated")
-}
-
-func TestInconsistentRayClusterStatus(t *testing.T) {
-	newScheme := runtime.NewScheme()
-	_ = rayv1.AddToScheme(newScheme)
-	fakeClient := clientFake.NewClientBuilder().WithScheme(newScheme).WithRuntimeObjects().Build()
-	r := &RayClusterReconciler{
-		Client:   fakeClient,
-		Recorder: &record.FakeRecorder{},
-		Scheme:   scheme.Scheme,
-	}
-
-	// Mock data
-	timeNow := metav1.Now()
-	oldStatus := rayv1.RayClusterStatus{
-		State:                   rayv1.Ready,
-		ReadyWorkerReplicas:     1,
-		AvailableWorkerReplicas: 1,
-		DesiredWorkerReplicas:   1,
-		MinWorkerReplicas:       1,
-		MaxWorkerReplicas:       10,
-		LastUpdateTime:          &timeNow,
-		Endpoints: map[string]string{
-			utils.ClientPortName:    strconv.Itoa(utils.DefaultClientPort),
-			utils.DashboardPortName: strconv.Itoa(utils.DefaultDashboardPort),
-			utils.GcsServerPortName: strconv.Itoa(utils.DefaultGcsServerPort),
-			utils.MetricsPortName:   strconv.Itoa(utils.DefaultMetricsPort),
-		},
-		Head: rayv1.HeadInfo{
-			PodIP:     "10.244.0.6",
-			ServiceIP: "10.96.140.249",
-		},
-		ObservedGeneration: 1,
-		Reason:             "test reason",
-	}
-
-	// `inconsistentRayClusterStatus` is used to check whether the old and new RayClusterStatus are inconsistent
-	// by comparing different fields. If the only differences between the old and new status are the `LastUpdateTime`
-	// and `ObservedGeneration` fields, the status update will not be triggered.
-	ctx := context.Background()
-
-	testCases := []struct {
-		modifyStatus func(*rayv1.RayClusterStatus)
-		name         string
-		expectResult bool
-	}{
-		{
-			name: "State is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.State = rayv1.Suspended
-			},
-			expectResult: true,
-		},
-		{
-			name: "Reason is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.Reason = "new reason"
-			},
-			expectResult: true,
-		},
-		{
-			name: "ReadyWorkerReplicas is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.ReadyWorkerReplicas = oldStatus.ReadyWorkerReplicas + 1
-			},
-			expectResult: true,
-		},
-		{
-			name: "AvailableWorkerReplicas is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.AvailableWorkerReplicas = oldStatus.AvailableWorkerReplicas + 1
-			},
-			expectResult: true,
-		},
-		{
-			name: "DesiredWorkerReplicas is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.DesiredWorkerReplicas = oldStatus.DesiredWorkerReplicas + 1
-			},
-			expectResult: true,
-		},
-		{
-			name: "MinWorkerReplicas is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.MinWorkerReplicas = oldStatus.MinWorkerReplicas + 1
-			},
-			expectResult: true,
-		},
-		{
-			name: "MaxWorkerReplicas is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.MaxWorkerReplicas = oldStatus.MaxWorkerReplicas + 1
-			},
-			expectResult: true,
-		},
-		{
-			name: "Endpoints is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.Endpoints["fakeEndpoint"] = "10009"
-			},
-			expectResult: true,
-		},
-		{
-			name: "Head.PodIP is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.Head.PodIP = "test head pod ip"
-			},
-			expectResult: true,
-		},
-		{
-			name: "RayClusterReplicaFailure is updated, expect result to be true",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				meta.SetStatusCondition(&newStatus.Conditions, metav1.Condition{Type: string(rayv1.RayClusterReplicaFailure), Status: metav1.ConditionTrue})
-			},
-			expectResult: true,
-		},
-		{
-			name: "LastUpdateTime is updated, expect result to be false",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.LastUpdateTime = &metav1.Time{Time: timeNow.Add(time.Hour)}
-			},
-			expectResult: false,
-		},
-		{
-			name: "ObservedGeneration is updated, expect result to be false",
-			modifyStatus: func(newStatus *rayv1.RayClusterStatus) {
-				newStatus.ObservedGeneration = oldStatus.ObservedGeneration + 1
-			},
-			expectResult: false,
-		},
-	}
-
-	for _, testCase := range testCases {
-		t.Run(testCase.name, func(t *testing.T) {
-			newStatus := oldStatus.DeepCopy()
-			testCase.modifyStatus(newStatus)
-			result := r.inconsistentRayClusterStatus(ctx, oldStatus, *newStatus)
-			assert.Equal(t, testCase.expectResult, result)
-		})
-	}
 }
 
 func TestCalculateStatus(t *testing.T) {
@@ -3402,6 +3264,9 @@ func TestReconcile_NumOfHosts(t *testing.T) {
 
 func TestSumGPUs(t *testing.T) {
 	nvidiaGPUResourceName := corev1.ResourceName("nvidia.com/gpu")
+	nvidiaMIG1g10gbResourceName := corev1.ResourceName("nvidia.com/mig-1g.10gb")
+	nvidiaMIG2g20gbResourceName := corev1.ResourceName("nvidia.com/mig-2g.20gb")
+	nvidiaMIG3g40gbResourceName := corev1.ResourceName("nvidia.com/mig-3g.40gb")
 	googleTPUResourceName := corev1.ResourceName("google.com/tpu")
 
 	tests := []struct {
@@ -3430,10 +3295,23 @@ func TestSumGPUs(t *testing.T) {
 			input: map[corev1.ResourceName]resource.Quantity{
 				corev1.ResourceCPU:                 resource.MustParse("1"),
 				nvidiaGPUResourceName:              resource.MustParse("3"),
+				nvidiaMIG1g10gbResourceName:        resource.MustParse("2"),
 				corev1.ResourceName("foo.bar/gpu"): resource.MustParse("2"),
 				googleTPUResourceName:              resource.MustParse("1"),
 			},
-			expected: resource.MustParse("5"),
+			expected: resource.MustParse("7"),
+		},
+		{
+			name: "multiple MIG types specified",
+			input: map[corev1.ResourceName]resource.Quantity{
+				corev1.ResourceCPU:          resource.MustParse("1"),
+				nvidiaGPUResourceName:       resource.MustParse("1"),
+				nvidiaMIG1g10gbResourceName: resource.MustParse("2"),
+				nvidiaMIG2g20gbResourceName: resource.MustParse("3"),
+				nvidiaMIG3g40gbResourceName: resource.MustParse("4"),
+				googleTPUResourceName:       resource.MustParse("1"),
+			},
+			expected: resource.MustParse("10"),
 		},
 	}
 
@@ -3689,6 +3567,7 @@ func Test_ReconcileManagedBy(t *testing.T) {
 func TestEmitRayClusterProvisionedDuration(t *testing.T) {
 	clusterName := "test-ray-cluster"
 	clusterNamespace := "default"
+	clusterUID := types.UID("test-cluster-uid")
 
 	// Creation time 5 minutes ago to simulate cluster runtime
 	creationTime := time.Now().Add(-5 * time.Minute)
@@ -3767,6 +3646,7 @@ func TestEmitRayClusterProvisionedDuration(t *testing.T) {
 					ObserveRayClusterProvisionedDuration(
 						clusterName,
 						clusterNamespace,
+						clusterUID,
 						mock.MatchedBy(func(d float64) bool {
 							// Allow some wiggle room in timing
 							return math.Abs(d-tc.expectedDuration) < 1.0
@@ -3778,6 +3658,7 @@ func TestEmitRayClusterProvisionedDuration(t *testing.T) {
 				mockCollector,
 				clusterName,
 				clusterNamespace,
+				clusterUID,
 				tc.oldStatus,
 				tc.newStatus,
 				creationTime,
@@ -3797,5 +3678,96 @@ func TestSetDefaults(t *testing.T) {
 	assert.Equal(t, map[string]string{}, cluster.Spec.HeadGroupSpec.RayStartParams)
 	for i := range cluster.Spec.WorkerGroupSpecs {
 		assert.Equal(t, map[string]string{}, cluster.Spec.WorkerGroupSpecs[i].RayStartParams)
+	}
+}
+
+func TestReconcile_AuthSecret(t *testing.T) {
+	setupTest(t)
+
+	testRayCluster.Spec.AuthOptions = &rayv1.AuthOptions{Mode: rayv1.AuthModeToken}
+
+	fakeClient := clientFake.NewClientBuilder().WithRuntimeObjects(testPods...).Build()
+	ctx := context.Background()
+
+	secretNamespacedName := types.NamespacedName{
+		Name:      instanceName,
+		Namespace: namespaceStr,
+	}
+
+	secret := corev1.Secret{}
+	err := fakeClient.Get(ctx, secretNamespacedName, &secret)
+	assert.True(t, k8serrors.IsNotFound(err), "Secret should not exist yet")
+
+	testRayClusterReconciler := &RayClusterReconciler{
+		Client:                     fakeClient,
+		Recorder:                   &record.FakeRecorder{},
+		Scheme:                     scheme.Scheme,
+		rayClusterScaleExpectation: expectations.NewRayClusterScaleExpectation(fakeClient),
+	}
+
+	err = testRayClusterReconciler.reconcileAuthSecret(ctx, testRayCluster)
+	require.NoError(t, err, "Fail to reconcile auth token secret")
+
+	err = fakeClient.Get(ctx, secretNamespacedName, &secret)
+	require.NoError(t, err, "Fail to get auth Secret after reconciliation")
+
+	decodedBytes, err := base64.StdEncoding.DecodeString(secret.StringData["auth_token"])
+	require.NoError(t, err)
+
+	assert.Len(t, decodedBytes, 32)
+}
+
+func TestReconcile_PodsWithAuthToken(t *testing.T) {
+	setupTest(t)
+
+	testRayCluster.Spec.AuthOptions = &rayv1.AuthOptions{Mode: rayv1.AuthModeToken}
+
+	fakeClient := clientFake.NewClientBuilder().WithRuntimeObjects().Build()
+	ctx := context.Background()
+
+	testRayClusterReconciler := &RayClusterReconciler{
+		Client:                     fakeClient,
+		Recorder:                   &record.FakeRecorder{},
+		Scheme:                     scheme.Scheme,
+		rayClusterScaleExpectation: expectations.NewRayClusterScaleExpectation(fakeClient),
+	}
+
+	err := testRayClusterReconciler.reconcilePods(ctx, testRayCluster)
+	require.NoError(t, err, "Fail to reconcile Pods")
+
+	podList := corev1.PodList{}
+	err = fakeClient.List(ctx, &podList, client.InNamespace(namespaceStr))
+	require.NoError(t, err, "Fail to get pod list")
+	numAllPods := len(podList.Items)
+	expectedNumPods := int(*testRayCluster.Spec.WorkerGroupSpecs[0].Replicas) + 1
+	assert.Equal(t, expectedNumPods, numAllPods, "unexpected number of pods")
+
+	// Assert that all Pods have RAY_AUTH_MODE and RAY_AUTH_TOKEN environment variables
+	for _, pod := range podList.Items {
+		authTokenEnvFound := false
+		authModeEnvFound := false
+		for _, env := range pod.Spec.Containers[utils.RayContainerIndex].Env {
+			if reflect.DeepEqual(corev1.EnvVar{Name: utils.RAY_AUTH_MODE_ENV_VAR, Value: string(rayv1.AuthModeToken)}, env) {
+				authModeEnvFound = true
+				continue
+			}
+
+			expectedSecretValue := corev1.EnvVar{
+				Name: utils.RAY_AUTH_TOKEN_ENV_VAR,
+				ValueFrom: &corev1.EnvVarSource{
+					SecretKeyRef: &corev1.SecretKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: testRayCluster.Name},
+						Key:                  "auth_token",
+					},
+				},
+			}
+			if reflect.DeepEqual(expectedSecretValue, env) {
+				authTokenEnvFound = true
+				continue
+			}
+		}
+
+		assert.True(t, authTokenEnvFound, "Auth token env vars not found")
+		assert.True(t, authModeEnvFound, "Auth mode env vars not found")
 	}
 }

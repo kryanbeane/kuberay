@@ -13,8 +13,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
+	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	rayv1 "github.com/ray-project/kuberay/ray-operator/apis/ray/v1"
+	"github.com/ray-project/kuberay/ray-operator/controllers/ray/utils/dashboardclient"
+	"github.com/ray-project/kuberay/ray-operator/pkg/features"
 )
 
 func TestGetClusterDomainName(t *testing.T) {
@@ -105,42 +108,97 @@ func TestCheckAllPodsRunning(t *testing.T) {
 	}
 }
 
-func TestPodName(t *testing.T) {
+func TestWorkerPodName(t *testing.T) {
 	tests := []struct {
 		name     string
 		prefix   string
-		nodeType rayv1.RayNodeType
 		expected string
 	}{
 		{
-			name:     "short cluster name, head pod",
-			prefix:   "ray-cluster-01",
-			nodeType: rayv1.HeadNode,
-			expected: "ray-cluster-01-head-",
-		},
-		{
 			name:     "short cluster name, worker pod",
 			prefix:   "ray-cluster-group-name-01",
-			nodeType: rayv1.WorkerNode,
 			expected: "ray-cluster-group-name-01-worker-",
-		},
-		{
-			name:     "long cluster name, head pod",
-			prefix:   "ray-cluster-0000000000000000000000011111111122222233333333333333",
-			nodeType: rayv1.HeadNode,
-			expected: "ray-cluster-00000000000000000000000111111111222222-head-",
 		},
 		{
 			name:     "long cluster name, worker pod",
 			prefix:   "ray-cluster-0000000000000000000000011111111122222233333333333333-group-name",
-			nodeType: rayv1.WorkerNode,
 			expected: "ray-cluster-00000000000000000000000111111111222222-worker-",
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			str := PodName(test.prefix, test.nodeType, true)
+			str := PodName(test.prefix, rayv1.WorkerNode, true)
+			if str != test.expected {
+				t.Logf("expected: %q", test.expected)
+				t.Logf("actual: %q", str)
+				t.Error("PodName returned an unexpected string")
+			}
+
+			// 63 (max pod name length) - 5 random hexadecimal characters from generateName
+			if len(str) > 58 {
+				t.Error("Generated pod name is too long")
+			}
+		})
+	}
+}
+
+func TestHeadPodName(t *testing.T) {
+	defer os.Unsetenv(ENABLE_DETERMINISTIC_HEAD_POD_NAME)
+
+	tests := []struct {
+		name                       string
+		prefix                     string
+		enableDeterministicHeadPod string
+		expected                   string
+	}{
+		{
+			name:                       "short cluster name, deterministic head pod name",
+			prefix:                     "ray-cluster-01",
+			enableDeterministicHeadPod: "true",
+			expected:                   "ray-cluster-01-head",
+		},
+		{
+			name:                       "short cluster name, non-deterministic head pod name",
+			prefix:                     "ray-cluster-01",
+			enableDeterministicHeadPod: "false",
+			expected:                   "ray-cluster-01-head-",
+		},
+		{
+			name:                       "short cluster name, feature flag not set",
+			prefix:                     "ray-cluster-01",
+			enableDeterministicHeadPod: "unset",
+			expected:                   "ray-cluster-01-head-",
+		},
+		{
+			name:                       "long cluster name, deterministic head pod name",
+			prefix:                     "ray-cluster-0000000000000000000000011111111122222233333333333333",
+			enableDeterministicHeadPod: "true",
+			expected:                   "ray-cluster-00000000000000000000000111111111222222-head",
+		},
+		{
+			name:                       "long cluster name, non-deterministic head pod name",
+			prefix:                     "ray-cluster-0000000000000000000000011111111122222233333333333333",
+			enableDeterministicHeadPod: "false",
+			expected:                   "ray-cluster-00000000000000000000000111111111222222-head-",
+		},
+		{
+			name:                       "long cluster name, feature flag not set",
+			prefix:                     "ray-cluster-0000000000000000000000011111111122222233333333333333",
+			enableDeterministicHeadPod: "unset",
+			expected:                   "ray-cluster-00000000000000000000000111111111222222-head-",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.enableDeterministicHeadPod == "unset" {
+				os.Unsetenv(ENABLE_DETERMINISTIC_HEAD_POD_NAME)
+			} else {
+				os.Setenv(ENABLE_DETERMINISTIC_HEAD_POD_NAME, test.enableDeterministicHeadPod)
+			}
+
+			str := PodName(test.prefix, rayv1.HeadNode, !IsDeterministicHeadPodNameEnabled())
 			if str != test.expected {
 				t.Logf("expected: %q", test.expected)
 				t.Logf("actual: %q", str)
@@ -271,7 +329,7 @@ func createSomePodWithCondition(typ corev1.PodConditionType, status corev1.Condi
 	}
 }
 
-func createRayHeadPodWithPhaseAndCondition(phase corev1.PodPhase, typ corev1.PodConditionType, status corev1.ConditionStatus) (pod *corev1.Pod) {
+func createRayHeadPodWithPhaseAndCondition(phase corev1.PodPhase, status corev1.ConditionStatus) (pod *corev1.Pod) {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: "v1",
@@ -288,8 +346,9 @@ func createRayHeadPodWithPhaseAndCondition(phase corev1.PodPhase, typ corev1.Pod
 			Phase: phase,
 			Conditions: []corev1.PodCondition{
 				{
-					Type:   typ,
+					Type:   corev1.PodReady,
 					Status: status,
+					Reason: ContainersNotReady,
 				},
 			},
 		},
@@ -431,11 +490,11 @@ func TestFindContainerPort(t *testing.T) {
 		},
 	}
 	port := FindContainerPort(&container, "port1", -1)
-	assert.NotEqual(t, port, -1, "expect port1 found")
+	assert.NotEqual(t, port, int32(-1), "expect port1 found")
 	port = FindContainerPort(&container, "port2", -1)
-	assert.NotEqual(t, port, -1, "expect port2 found")
+	assert.NotEqual(t, port, int32(-1), "expect port2 found")
 	port = FindContainerPort(&container, "port3", -1)
-	assert.Equal(t, port, -1, "expect port3 not found")
+	assert.Equal(t, port, int32(-1), "expect port3 not found")
 }
 
 func TestGenerateHeadServiceName(t *testing.T) {
@@ -481,9 +540,17 @@ func TestGenerateHeadServiceName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, expectedGeneratedSvcName, headSvcName)
 
-	// Invalid CRD type
-	_, err = GenerateHeadServiceName(RayJobCRD, rayv1.RayClusterSpec{}, "rayjob-sample")
-	require.Error(t, err)
+	// [RayJob]
+	// Test 5: `HeadService.Name` is empty.
+	headSvcName, err = GenerateHeadServiceName(RayJobCRD, rayv1.RayClusterSpec{}, "rayjob-sample")
+	expectedGeneratedSvcName = "rayjob-sample-head-svc"
+	require.NoError(t, err)
+	assert.Equal(t, expectedGeneratedSvcName, headSvcName)
+
+	// Test 6: `HeadService.Name` is not empty.
+	headSvcName, err = GenerateHeadServiceName(RayJobCRD, *clusterSpecWithHeadService.DeepCopy(), "rayjob-sample")
+	require.NoError(t, err)
+	assert.Equal(t, expectedGeneratedSvcName, headSvcName)
 }
 
 func TestGetWorkerGroupDesiredReplicas(t *testing.T) {
@@ -740,6 +807,100 @@ func TestCalculateDesiredReplicas(t *testing.T) {
 	}
 }
 
+func TestCalculateMaxReplicasOverflow(t *testing.T) {
+	tests := []struct {
+		name     string
+		specs    []rayv1.WorkerGroupSpec
+		expected int32
+	}{
+		{
+			name: "Bug reproduction: issue report with replicas=1, minReplicas=3, numOfHosts=4",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					GroupName:   "workergroup",
+					Replicas:    ptr.To[int32](1),
+					MinReplicas: ptr.To[int32](3),
+					MaxReplicas: ptr.To[int32](2147483647), // Default max int32
+					NumOfHosts:  4,
+				},
+			},
+			expected: 2147483647, // Was -4 before fix, should be capped at max int32
+		},
+		{
+			name: "Single group overflow with default maxReplicas and numOfHosts=4",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					NumOfHosts:  4,
+					MinReplicas: ptr.To[int32](3),
+					MaxReplicas: ptr.To[int32](2147483647),
+				},
+			},
+			expected: 2147483647, // Should be capped at max int32
+		},
+		{
+			name: "Single group overflow with large values",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					NumOfHosts:  1000,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](2147483647),
+				},
+			},
+			expected: 2147483647, // Should be capped
+		},
+		{
+			name: "Multiple groups causing overflow when summed",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					NumOfHosts:  2,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](1500000000),
+				},
+				{
+					NumOfHosts:  1,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](1000000000),
+				},
+			},
+			expected: 2147483647, // 3B + 1B > max int32, should be capped
+		},
+		{
+			name: "No overflow with reasonable values",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					NumOfHosts:  4,
+					MinReplicas: ptr.To[int32](2),
+					MaxReplicas: ptr.To[int32](100),
+				},
+			},
+			expected: 400, // 100 * 4 = 400, no overflow
+		},
+		{
+			name: "Edge case: exactly at max int32",
+			specs: []rayv1.WorkerGroupSpec{
+				{
+					NumOfHosts:  1,
+					MinReplicas: ptr.To[int32](1),
+					MaxReplicas: ptr.To[int32](2147483647),
+				},
+			},
+			expected: 2147483647, // Exactly at limit
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cluster := &rayv1.RayCluster{
+				Spec: rayv1.RayClusterSpec{
+					WorkerGroupSpecs: tc.specs,
+				},
+			}
+			result := CalculateMaxReplicas(cluster)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
 func TestUnmarshalRuntimeEnv(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -768,7 +929,7 @@ env_vars:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := UnmarshalRuntimeEnvYAML(tc.runtimeEnvYAML)
+			_, err := dashboardclient.UnmarshalRuntimeEnvYAML(tc.runtimeEnvYAML)
 			if tc.isErrorNil {
 				require.NoError(t, err)
 			} else {
@@ -786,7 +947,7 @@ func TestFindHeadPodReadyCondition(t *testing.T) {
 	}{
 		{
 			name: "condition true if Ray head pod is running and ready",
-			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodRunning, corev1.PodReady, corev1.ConditionTrue),
+			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodRunning, corev1.ConditionTrue),
 			expected: metav1.Condition{
 				Type:   string(rayv1.HeadPodReady),
 				Status: metav1.ConditionTrue,
@@ -794,7 +955,7 @@ func TestFindHeadPodReadyCondition(t *testing.T) {
 		},
 		{
 			name: "condition false if Ray head pod is not running",
-			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodPending, corev1.PodReady, corev1.ConditionFalse),
+			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodPending, corev1.ConditionFalse),
 			expected: metav1.Condition{
 				Type:   string(rayv1.HeadPodReady),
 				Status: metav1.ConditionFalse,
@@ -802,7 +963,7 @@ func TestFindHeadPodReadyCondition(t *testing.T) {
 		},
 		{
 			name: "condition false if Ray head pod is not ready",
-			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodRunning, corev1.PodReady, corev1.ConditionFalse),
+			pod:  createRayHeadPodWithPhaseAndCondition(corev1.PodRunning, corev1.ConditionFalse),
 			expected: metav1.Condition{
 				Type:   string(rayv1.HeadPodReady),
 				Status: metav1.ConditionFalse,
@@ -814,6 +975,88 @@ func TestFindHeadPodReadyCondition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			headPodReadyCondition := FindHeadPodReadyCondition(tc.pod)
 			assert.Equal(t, tc.expected.Status, headPodReadyCondition.Status)
+		})
+	}
+}
+
+func TestFindHeadPodReadyMessage(t *testing.T) {
+	tests := []struct {
+		name        string
+		message     string
+		wantMessage string
+		wantReason  string
+		status      []corev1.ContainerStatus
+	}{{
+		name:       "no message no status want original reason",
+		wantReason: ContainersNotReady,
+	}, {
+		name:        "no container status want original reason",
+		message:     "TooEarlyInTheMorning",
+		wantMessage: "TooEarlyInTheMorning",
+		wantReason:  ContainersNotReady,
+	}, {
+		name:    "one reason one status",
+		message: "containers not ready",
+		status: []corev1.ContainerStatus{{
+			Name: "ray",
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ImagePullBackOff",
+					Message: `Back-off pulling image royproject/roy:latest: ErrImagePull: rpc error: code = NotFound`,
+				},
+			},
+		}},
+		wantReason:  "ImagePullBackOff",
+		wantMessage: `containers not ready; ray: Back-off pulling image royproject/roy:latest: ErrImagePull: rpc error: code = NotFound`,
+	}, {
+		name:    "one reason two statuses only copy first",
+		message: "aesthetic problems",
+		status: []corev1.ContainerStatus{{
+			Name: "indigo",
+			State: corev1.ContainerState{
+				Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "BadColor",
+					Message: "too blue",
+				},
+			},
+		}, {
+			Name: "circle",
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					Reason:  "BadGeometry",
+					Message: "too round",
+				},
+			},
+		}},
+		wantReason:  "BadColor",
+		wantMessage: "aesthetic problems; indigo: too blue",
+	}, {
+		name: "no reason one status",
+		status: []corev1.ContainerStatus{{
+			Name: "my-image",
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{
+					Reason:  "Crashed",
+					Message: "bash not found",
+				},
+			},
+		}},
+		wantReason:  "Crashed",
+		wantMessage: "my-image: bash not found",
+	}}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := createRayHeadPodWithPhaseAndCondition(corev1.PodPending, corev1.ConditionFalse)
+			pod.Status.Conditions[0].Message = tc.message
+			pod.Status.ContainerStatuses = tc.status
+			cond := FindHeadPodReadyCondition(pod)
+			if cond.Message != tc.wantMessage {
+				t.Errorf("FindHeadPodReadyCondition(...) returned condition with message %q, but wanted %q", cond.Message, tc.wantMessage)
+			}
+			if cond.Reason != tc.wantReason {
+				t.Errorf("FindHeadPodReadyCondition(...) returned condition with reason %q, but wanted %q", cond.Reason, tc.wantReason)
+			}
 		})
 	}
 }
@@ -1185,6 +1428,235 @@ func TestCalculateResources(t *testing.T) {
 	}
 }
 
+// helper function to return a Gateway object with GatewayStatus Conditions for testing.
+func makeGatewayWithCondition(accepted bool, programmed bool) *gwv1.Gateway {
+	var conditions []metav1.Condition
+
+	if accepted {
+		conditions = append(conditions, metav1.Condition{
+			Type:   string(gwv1.GatewayConditionAccepted),
+			Status: metav1.ConditionTrue,
+		})
+	}
+
+	if programmed {
+		conditions = append(conditions, metav1.Condition{
+			Type:   string(gwv1.GatewayConditionProgrammed),
+			Status: metav1.ConditionTrue,
+		})
+	}
+
+	return &gwv1.Gateway{
+		Status: gwv1.GatewayStatus{
+			Conditions: conditions,
+		},
+	}
+}
+
+func TestIsGatewayReady(t *testing.T) {
+	tests := []struct {
+		gateway  *gwv1.Gateway
+		name     string
+		expected bool
+	}{
+		{
+			name:     "missing Gateway instance",
+			gateway:  nil,
+			expected: false,
+		},
+		{
+			name:     "Gateway created with Programmed condition only",
+			gateway:  makeGatewayWithCondition(false, true),
+			expected: false,
+		},
+		{
+			name:     "Gateway created with Accepted condition only",
+			gateway:  makeGatewayWithCondition(true, false),
+			expected: false,
+		},
+		{
+			name:     "Gateway created with both Accepted and Programmed conditions",
+			gateway:  makeGatewayWithCondition(true, true),
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsGatewayReady(tt.gateway))
+		})
+	}
+}
+
+// helper function to return a HTTPRoute with HTTPRouteStatus for testing
+func makeHTTPRouteWithParentRef(
+	parentRefName string,
+	namespace string,
+	accepted bool,
+	resolvedRefs bool,
+) *gwv1.HTTPRoute {
+	var acceptedStatus, resolvedRefsStatus metav1.ConditionStatus
+	if accepted {
+		acceptedStatus = metav1.ConditionTrue
+	} else {
+		acceptedStatus = metav1.ConditionFalse
+	}
+	if resolvedRefs {
+		resolvedRefsStatus = metav1.ConditionTrue
+	} else {
+		resolvedRefsStatus = metav1.ConditionFalse
+	}
+
+	return &gwv1.HTTPRoute{
+		Status: gwv1.HTTPRouteStatus{
+			RouteStatus: gwv1.RouteStatus{
+				Parents: []gwv1.RouteParentStatus{
+					{
+						ParentRef: gwv1.ParentReference{
+							Name:      gwv1.ObjectName(parentRefName),
+							Namespace: ptr.To(gwv1.Namespace(namespace)),
+						},
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(gwv1.RouteConditionAccepted),
+								Status: acceptedStatus,
+							},
+							{
+								Type:   string(gwv1.RouteConditionResolvedRefs),
+								Status: resolvedRefsStatus,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestIsHTTPRouteReady(t *testing.T) {
+	gateway := &gwv1.Gateway{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-gateway", Namespace: "test-ns"},
+	}
+
+	tests := []struct {
+		httpRoute *gwv1.HTTPRoute
+		name      string
+		expected  bool
+	}{
+		{
+			name:      "missing HTTPRoute",
+			httpRoute: nil,
+			expected:  false,
+		},
+		{
+			name:      "ParentRef does not match",
+			httpRoute: makeHTTPRouteWithParentRef("not-a-match", "other-test-ns", true, true),
+			expected:  false,
+		},
+		{
+			name:      "matching ParentRef with Accepted condition but without ResolvedRefs",
+			httpRoute: makeHTTPRouteWithParentRef("test-gateway", "test-ns", true, false),
+			expected:  false,
+		},
+		{
+			name:      "matching ParentRef with ResolvedRefs but without Accepted",
+			httpRoute: makeHTTPRouteWithParentRef("test-gateway", "test-ns", false, true),
+			expected:  false,
+		},
+		{
+			name:      "ready HTTPRoute with all required conditions",
+			httpRoute: makeHTTPRouteWithParentRef("test-gateway", "test-ns", true, true),
+			expected:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, IsHTTPRouteReady(gateway, tt.httpRoute))
+		})
+	}
+}
+
+func TestIsIncrementalUpgradeEnabled(t *testing.T) {
+	tests := []struct {
+		spec           *rayv1.RayServiceSpec
+		name           string
+		featureEnabled bool
+		expected       bool
+	}{
+		{
+			name:           "missing UpgradeStrategy Type",
+			spec:           &rayv1.RayServiceSpec{},
+			featureEnabled: true,
+			expected:       false,
+		},
+		{
+			name: "UpgradeStrategy Type is NewClusterWithIncrementalUpgrade but feature disabled",
+			spec: &rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					Type: ptr.To(rayv1.NewClusterWithIncrementalUpgrade),
+				},
+			},
+			featureEnabled: false,
+			expected:       false,
+		},
+		{
+			name: "UpgradeStrategy Type is NewClusterWithIncrementalUpgrade and feature enabled",
+			spec: &rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					Type: ptr.To(rayv1.NewClusterWithIncrementalUpgrade),
+				},
+			},
+			featureEnabled: true,
+			expected:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			features.SetFeatureGateDuringTest(t, features.RayServiceIncrementalUpgrade, tc.featureEnabled)
+			assert.Equal(t, tc.expected, IsIncrementalUpgradeEnabled(tc.spec))
+		})
+	}
+}
+
+func TestGetRayServiceClusterUpgradeOptions(t *testing.T) {
+	upgradeOptions := &rayv1.ClusterUpgradeOptions{GatewayClassName: "gateway-class"}
+
+	tests := []struct {
+		rayServiceSpec  *rayv1.RayServiceSpec
+		expectedOptions *rayv1.ClusterUpgradeOptions
+		name            string
+	}{
+		{
+			name:            "RayServiceSpec is nil, return nil ClusterUpgradeOptions",
+			rayServiceSpec:  nil,
+			expectedOptions: nil,
+		},
+		{
+			name:            "UpgradeStrategy is nil, return nil ClusterUpgradeOptions",
+			rayServiceSpec:  &rayv1.RayServiceSpec{},
+			expectedOptions: nil,
+		},
+		{
+			name: "Valid ClusterUpgradeOptions",
+			rayServiceSpec: &rayv1.RayServiceSpec{
+				UpgradeStrategy: &rayv1.RayServiceUpgradeStrategy{
+					ClusterUpgradeOptions: upgradeOptions,
+				},
+			},
+			expectedOptions: upgradeOptions,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actualOptions := GetRayServiceClusterUpgradeOptions(tt.rayServiceSpec)
+			assert.Equal(t, tt.expectedOptions, actualOptions)
+		})
+	}
+}
+
 func TestGetContainerCommand(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -1340,4 +1812,96 @@ func TestGenerateDNS1123NameUniqueness(t *testing.T) {
 		"Different inputs should produce different names (via different hashes)")
 	assert.Len(t, result1, 63, "Should be 63 chars")
 	assert.Len(t, result2, 63, "Should be 63 chars")
+}
+func TestGetWeightsFromHTTPRoute(t *testing.T) {
+	activeClusterName := "rayservice-active"
+	pendingClusterName := "rayservice-pending"
+
+	// Helper to create a RayService with specified cluster names in its status.
+	makeRayService := func(activeName, pendingName string) *rayv1.RayService {
+		return &rayv1.RayService{
+			Status: rayv1.RayServiceStatuses{
+				ActiveServiceStatus:  rayv1.RayServiceStatus{RayClusterName: activeName},
+				PendingServiceStatus: rayv1.RayServiceStatus{RayClusterName: pendingName},
+			},
+		}
+	}
+
+	// Helper to create an HTTPRoute with specified backend weights.
+	makeHTTPRoute := func(activeWeight, pendingWeight *int32) *gwv1.HTTPRoute {
+		backends := []gwv1.HTTPBackendRef{}
+		if activeWeight != nil {
+			backends = append(backends, gwv1.HTTPBackendRef{
+				BackendRef: gwv1.BackendRef{
+					BackendObjectReference: gwv1.BackendObjectReference{Name: gwv1.ObjectName(GenerateServeServiceName(activeClusterName))},
+					Weight:                 activeWeight,
+				},
+			})
+		}
+		if pendingWeight != nil {
+			backends = append(backends, gwv1.HTTPBackendRef{
+				BackendRef: gwv1.BackendRef{
+					BackendObjectReference: gwv1.BackendObjectReference{Name: gwv1.ObjectName(GenerateServeServiceName(pendingClusterName))},
+					Weight:                 pendingWeight,
+				},
+			})
+		}
+		return &gwv1.HTTPRoute{
+			Spec: gwv1.HTTPRouteSpec{
+				Rules: []gwv1.HTTPRouteRule{{BackendRefs: backends}},
+			},
+		}
+	}
+
+	tests := []struct {
+		httpRoute       *gwv1.HTTPRoute
+		rayService      *rayv1.RayService
+		name            string
+		expectedActive  int32
+		expectedPending int32
+	}{
+		{
+			name:            "No HTTPRoute, return defaults for both weights",
+			httpRoute:       nil,
+			rayService:      makeRayService(activeClusterName, ""),
+			expectedActive:  -1,
+			expectedPending: -1,
+		},
+		{
+			name:            "HTTPRoute with missing backends, return defaults for both weights",
+			httpRoute:       &gwv1.HTTPRoute{Spec: gwv1.HTTPRouteSpec{Rules: []gwv1.HTTPRouteRule{{}}}},
+			rayService:      makeRayService(activeClusterName, pendingClusterName),
+			expectedActive:  -1,
+			expectedPending: -1,
+		},
+		{
+			name:            "Valid weights returned for both active and pending clusters",
+			httpRoute:       makeHTTPRoute(ptr.To(int32(80)), ptr.To(int32(20))),
+			rayService:      makeRayService(activeClusterName, pendingClusterName),
+			expectedActive:  80,
+			expectedPending: 20,
+		},
+		{
+			name:            "Valid HTTPRoute with only active cluster backend",
+			httpRoute:       makeHTTPRoute(ptr.To(int32(100)), nil),
+			rayService:      makeRayService(activeClusterName, ""),
+			expectedActive:  100,
+			expectedPending: -1,
+		},
+		{
+			name:            "Valid HTTPRoute with only pending cluster backend",
+			httpRoute:       makeHTTPRoute(nil, ptr.To(int32(100))),
+			rayService:      makeRayService("", pendingClusterName),
+			expectedActive:  -1,
+			expectedPending: 100,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			active, pending := GetWeightsFromHTTPRoute(tt.httpRoute, tt.rayService)
+			assert.Equal(t, tt.expectedActive, active, "Active weight mismatch")
+			assert.Equal(t, tt.expectedPending, pending, "Pending weight mismatch")
+		})
+	}
 }

@@ -97,6 +97,20 @@ kubectl logs deployments/kuberay-operator
 * The command `make docker-build` (Step 3) will also run `make build` (Go project compilation).
 * Step 6 also installs the custom resource definitions (CRDs) used by the KubeRay operator.
 
+#### Using Local Deployment Script
+
+You can also run the `local_deploy.sh` bash script (located in `ray-operator/hack`) which runs the steps shown above, but deletes and recreates the kind cluster each run for consistency during repeated development.
+
+There are configuable variables in the script, the defaults are shown below:
+
+```bash
+IMAGE_TAG="kuberay-dev"
+KIND_CLUSTER_NAME="kuberay-dev"
+KIND_NODE_IMAGE="kindest/node:v1.24.0"
+```
+
+Additionally, you can run the script with a `-l` or `--logs` to stream the logs of the ray operator to the terminal after installation.
+
 ### Run the operator outside the cluster
 
 This step requires you to switch your working directory to the kuberay project root. If
@@ -229,7 +243,7 @@ See [main development documentation][main-dev-doc].
 
 ### Helm chart linter
 
-We have [chart lint tests](https://github.com/ray-project/kuberay/blob/master/.github/workflows/helm-lint.yaml) with Helm v3.4.1 and Helm v3.9.4 on GitHub Actions. We also provide a script to execute the lint tests on your laptop. If you cannot reproduce the errors on GitHub Actions, the possible reason is the different version of Helm. Issue [#537](https://github.com/ray-project/kuberay/issues/537) is an example that some errors only happen in old helm versions.
+We have [chart lint tests](https://github.com/ray-project/kuberay/blob/master/.github/workflows/helm.yaml) with Helm v3.4.1 and Helm v3.9.4 on GitHub Actions. We also provide a script to execute the lint tests on your laptop. If you cannot reproduce the errors on GitHub Actions, the possible reason is the different version of Helm. Issue [#537](https://github.com/ray-project/kuberay/issues/537) is an example that some errors only happen in old helm versions.
 
 Run tests with docker
 

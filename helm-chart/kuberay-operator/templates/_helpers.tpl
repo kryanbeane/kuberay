@@ -168,7 +168,22 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - pods/resize
+  verbs:
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - secrets
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - serviceaccounts
   verbs:
   - delete
   - get
@@ -274,21 +289,11 @@ rules:
   - gateway.networking.k8s.io
   resources:
   - gateways
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - gateway.networking.k8s.io
-  resources:
   - httproutes
-  - referencegrants
   verbs:
   - create
-  - delete
   - get
   - list
-  - patch
   - update
   - watch
 - apiGroups:
@@ -407,12 +412,17 @@ rules:
   - list
   - update
   - watch
+{{- end -}}
+{{- if or .batchSchedulerEnabled (eq .batchSchedulerName "scheduler-plugins") }}
 - apiGroups:
-  - apiextensions.k8s.io
+  - scheduling.x-k8s.io
   resources:
-  - customresourcedefinitions
+  - podgroups
   verbs:
+  - create
   - get
+  - list
+  - watch
 {{- end -}}
 {{- if or .batchSchedulerEnabled (eq .batchSchedulerName "scheduler-plugins") }}
 - apiGroups:
